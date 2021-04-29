@@ -19,10 +19,11 @@ from transformers import BertTokenizer, RobertaTokenizer
 
 MAX_LEN = 512
 
-_ROUGE_PATH = '/path/to/RELEASE-1.5.5'
+_ROUGE_PATH = '/Users/Olga/Projects/git/rouge/tools/RELEASE-1.5.5'
 temp_path = './temp' # path to store some temporary files
 
 original_data, sent_ids = [], []
+
 
 def load_jsonl(data_path):
     data = []
@@ -30,6 +31,7 @@ def load_jsonl(data_path):
         for line in f:
             data.append(json.loads(line))
     return data
+
 
 def get_rouge(path, dec):
     log.get_global_console_logger().setLevel(logging.WARNING)
@@ -64,6 +66,7 @@ def get_rouge(path, dec):
         rouge2 = float(line[7].split(' ')[3])
         rougel = float(line[11].split(' ')[3])
     return (rouge1 + rouge2 + rougel) / 3
+
 
 @curry
 def get_candidates(tokenizer, cls, sep_id, idx):
@@ -200,6 +203,7 @@ def get_candidates_mp(args):
             print(json.dumps(data), file=f)
     
     os.system('rm -r {}'.format(temp_path))
+
 
 if __name__ == '__main__':
     
