@@ -9,6 +9,7 @@ from time import time
 from datetime import timedelta
 import queue
 import logging
+import random
 from itertools import combinations
 
 from cytoolz import curry
@@ -17,9 +18,12 @@ from pyrouge import Rouge155
 
 from transformers import BertTokenizer, RobertaTokenizer
 
+from sentence_transformers import SentenceTransformer
+from scipy.spatial.distance import cosine
+
 MAX_LEN = 512
 
-_ROUGE_PATH = '/Users/Olga/Projects/git/rouge/tools/RELEASE-1.5.5'
+_ROUGE_PATH = '/Users/Olga/Projects/git/rouge/tools/ROUGE-1.5.5'
 temp_path = './temp' # path to store some temporary files
 
 original_data, sent_ids = [], []
@@ -68,6 +72,92 @@ def get_rouge(path, dec):
     return (rouge1 + rouge2 + rougel) / 3
 
 
+def sentence_bert_embedding(sentences):
+    sbert_model = SentenceTransformer('bert-base-nli-mean-tokens')
+    sentence_embeddings = sbert_model.encode(sentences)
+    return sentence_embeddings
+
+
+def get_distances(vectors):
+    '''
+    Calculate matrix of cosine distances
+    :param vectors: input vectors, list of lists of floats, size n
+    :return: nxn distance matrix
+    '''
+
+    distance = [[0]*len(vectors) for i in range(len(vectors))]
+    for i in range(len(vectors) - 1):
+        for j in range(i + 1, len(vectors), 1):
+            distance[i][j] = distance[j][i] = cosine(vectors[i], vectors[j])
+
+    return distance
+
+
+def most_distant(pool, candidates, dist_matr):
+    '''
+    Iterate over all candidates and select the most outmost from the pool
+    based on min distance
+    :param pool: already selected vector indices
+    :param candidates: candidate indices to be added to the pool
+    :param dist_matr: distances between vectors
+    :return:
+    '''
+    max_dist = 0
+    most_dist = []
+    for candidate in candidates:
+        min = -1
+        for ex_pont in pool:
+            if min == -1 or min > dist_matr[candidate][ex_pont]:
+                min = dist_matr[candidate][ex_pont]
+        if min > max_dist:
+            max_dist = min
+            most_dist = candidate
+    return most_dist
+
+
+def outmost_vectors(vectors, count, distances):
+    starting_point = random.randint(0, len(vectors) - 1)
+    leftover = [i for i in range(len(vectors))]
+    output = [starting_point]
+    if starting_point not in leftover:
+        print(starting_point)
+    leftover.remove(starting_point)
+    while len(output) < count:
+        next_point = most_distant(output, leftover, distances)
+        output.append(next_point)
+        if next_point not in leftover:
+            print(next_point)
+        leftover.remove(next_point)
+
+    return output
+
+
+def group_by_similarity(sent_candidates, min_cand, max_cand, number_of_iterations=5):
+    '''
+    Given candidates, select subsets of length between min_cand and max_cand
+    with most dissimilar utterances
+    :param sent_candidates: all candidate sentences
+    :param min_cand: min number of sentences in candidate
+    :param max_cand: max number of sentences in candidate
+    :param number_of_iterations: for each targeted number f sentences, how much time generate subset
+    :return: list of lists with subsets of utternaces
+    '''
+
+    embeddings = sentence_bert_embedding(sent_candidates)
+    distance_matrix = get_distances(embeddings)
+
+    # collect indices of outmost vectors
+    output = []
+
+    for target in range(min_cand, max_cand + 1, 1):
+        for iter in range(number_of_iterations):
+            indices = outmost_vectors(embeddings, target, distance_matrix)
+            sentences = [sent_candidates[i] for i in indices]
+            output.append(sentences)
+
+    return output
+
+
 @curry
 def get_candidates(tokenizer, cls, sep_id, idx):
 
@@ -90,45 +180,37 @@ def get_candidates(tokenizer, cls, sep_id, idx):
             print(sentence, file=f)
 
     # get candidate summaries
-    # here is for CNN/DM: truncate each document into the 5 most important sentences (using BertExt), 
-    # then select any 2 or 3 sentences to form a candidate summary, so there are C(5,2)+C(5,3)=20 candidate summaries.
+    # here is for CNN/DM: truncate each document into the 50 most important sentences (using BertExt),
+    # then select between 20 and 40 sentences, each with 5 random initialization, to form a candidate summary,
+    # so there are (40-20)*5=100 candidate summaries.
     # if you want to process other datasets, you may need to adjust these numbers according to specific situation.
-    sent_id = sent_ids[idx]['sent_id'][:5]
-    indices = list(combinations(sent_id, 2))
-    indices += list(combinations(sent_id, 3))
-    if len(sent_id) < 2:
-        indices = [sent_id]
+    sent_id = sent_ids[idx]['sent_id'][:50]
+
+    sentences = group_by_similarity([data['text'][index] for index in sent_id], 20, 40)
     
     # get ROUGE score for each candidate summary and sort them in descending order
     score = []
-    for i in indices:
-        i = list(i)
-        i.sort()
-        # write dec
-        dec = []
-        for j in i:
-            sent = data['text'][j]
-            dec.append(sent)
-        score.append((i, get_rouge(idx_path, dec)))
-    score.sort(key=lambda x : x[1], reverse=True)
+    for sent_set in sentences:
+        score.append((sent_set, get_rouge(idx_path, sent_set)))
+    score.sort(key=lambda x: x[1], reverse=True)
     
     # write candidate indices and score
-    data['ext_idx'] = sent_id
-    data['indices'] = []
-    data['score'] = []
-    for i, R in score:
-        data['indices'].append(list(map(int, i)))
-        data['score'].append(R)
-
     # tokenize and get candidate_id
     candidate_summary = []
-    for i in data['indices']:
+    data['ext_idx'] = sent_id
+    data['score'] = []
+    data['indices'] = []
+    for i, R in score:
+        data_ind = []
+        data['score'].append(R)
         cur_summary = [cls]
-        for j in i:
-            cur_summary += data['text'][j].split()
+        for sentence in i:
+            cur_summary += sentence.split()
+            data_ind.append(data['text'].index(sentence))
         cur_summary = cur_summary[:MAX_LEN]
         cur_summary = ' '.join(cur_summary)
         candidate_summary.append(cur_summary)
+        data['indices'].append(data_ind)
     
     data['candidate_id'] = []
     for summary in candidate_summary:
@@ -162,6 +244,7 @@ def get_candidates(tokenizer, cls, sep_id, idx):
         json.dump(data, f, indent=4) 
     
     sp.call('rm -r ' + idx_path, shell=True)
+
 
 def get_candidates_mp(args):
     
